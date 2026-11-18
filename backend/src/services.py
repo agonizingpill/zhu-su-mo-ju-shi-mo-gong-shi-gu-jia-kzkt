@@ -24,6 +24,9 @@ def commit_capacity(s,eid):
     floor=round(e.predicted_hours*e.rate*1.15,2)
     if e.quote_amount<floor: raise HTTPException(409,f'报价低于成本底线 {floor:.2f} 元，请修订报价后重新申请')
     slot=s.query(MachineSlot).filter_by(id=e.slot_id).with_for_update().one()
+    from .drift_service import assert_gate_open
+    # 漂移报警与暂停同步：机台报警未解除时，新承诺一律拦下，已承诺单不受影响。
+    assert_gate_open(s,slot.machine)
     if e.predicted_hours>slot.capacity_hours-slot.reserved_hours+1e-6: raise HTTPException(409,'机时已被其他承诺占用，不能超售')
     slot.reserved_hours=round(slot.reserved_hours+e.predicted_hours,2)
     e.status='committed'

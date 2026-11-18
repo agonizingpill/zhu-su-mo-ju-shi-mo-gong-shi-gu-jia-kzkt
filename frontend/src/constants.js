@@ -9,3 +9,9 @@ export const MAINTENANCE_STATES={planned:'待批准保养',approved:'停机已�
 export const RESIN_STATES={available:'批次可用',quarantine:'批次隔离'};
 export const MATERIAL_STATES={issued:'已领料',returned:'已登记退料'};
 export const DELIVERY_STATES={dispatched:'已发样待签收',received:'客户已签收',accepted:'客户接受',rectification:'需整改重试',closed:'主管已关闭'};
+
+export const DRIFT_RUN_STATES={queued:'排队待检',running:'检测进行中',done:'检测完成',failed:'检测失败'};
+export const DRIFT_ALARM_STATES={active:'报警中·暂停新承诺',released:'主管已解除',superseded:'新异常令旧解除失效'};
+export const DRIFT_GATE_STATES={open:'可接新承诺',paused:'暂停新机时承诺'};
+export const DRIFT_OBS_KINDS={actual:'完工实绩',lower_bound:'未完工已耗时下界'};
+export const DRIFT_DECISIONS={normal:'未发现低估漂移',alarm:'工时低估漂移报警',insufficient:'样本不足·不宣称正常',pending:'尚未出结论'};

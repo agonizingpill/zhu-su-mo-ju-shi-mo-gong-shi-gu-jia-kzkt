@@ -18,6 +18,8 @@
 - 试模材料领耗：主管树脂批次入库，树脂状态available/quarantine；运行实绩按批次一次领料，锁库存，冻结单价；完工且未建结算可一次退余料，最多退领量。净耗成本=Σ((领kg−退kg)×单价快照)。所有新结算按台账取成本，拒绝任意覆盖；结算建立后领退料冻结。已signed历史数值保持，不补写旧凭据。
 - 客户交付验收：只从signed结算交样，样件数≤实绩good_shots；发样→客户签收→接受或整改→主管关闭。整改必须绑定原完工之后新一次同模具signed实绩，旧实绩或其他模具不能替代；重复签收/关闭拒绝。这里只留本地交接和客户意见，不发送外部消息。
 
+- 工时低估漂移守门（V4）：保留估价回归不变，按机台、按开工顺序对「开工时冻结的预测工时」与实际工时做序贯单边 CUSUM。主管在页面设置允许漂移常数 k、判决阈值 h 与最小完工样本数。完工快的试模先入账，长工时仍在运行时只以「已耗时下界」进入序列：下界可把统计量推过阈值触发低估报警，但绝不据此判定正常；完工后下一轮检测整段重放，在原位置用最终实际工时替换下界观测，迟报按原位置回放、不重复计数。完工样本不足 min_samples 时结论只能是「样本不足，不宣称正常」。每步检测落库为 checkpoint，worker 崩溃后把 running 轮次重新入队，按原观测序列续跑，应发的报警仍会发出。报警与机台暂停并发：活动报警期间该机台新机时承诺在后端事务中直接拒绝，已承诺单全部保留；主管解除须核对最新一轮检测证据（阈值未改、无排队轮次、S 已低于 h），解除后一旦出现新异常，旧解除自动置为 superseded 失效。
+
 ## 快速启动
 
 ```sh
@@ -31,7 +33,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 |账号|口令|角色|任务与权限|
 |---|---|---|---|
-|admin@ruimo.demo|Mould2026!|admin|全部读写、开放机时、最终承诺、超时完工与结算签结、保养批准、树脂入库/隔离、客户交付关闭|
+|admin@ruimo.demo|Mould2026!|admin|全部读写、开放机时、最终承诺、超时完工与结算签结、保养批准、树脂入库/隔离、客户交付关闭、漂移阈值设置与报警解除|
 |estimator@ruimo.demo|Mould2026!|estimator|录入模具、建立修订估价、估算、申请机时；常规开工完工、保养计划/完检、领退料、客户签收/验收记录、结算草稿；不能承诺或签结|
 |viewer@ruimo.demo|Mould2026!|viewer|只读九业务页面与审计|
 
@@ -57,9 +59,13 @@ V3：09:00 MD-115计划11月25日08:00—12:00顶针润滑与滑块检查，主�
 
 输入模腔数、滑块数、重量、钢材编码（P20=0、H13=1、S136=2）。PolynomialFeatures(degree=2, interaction_only=True) 生成原始项和交叉项，StandardScaler 按训练集拟合，Ridge(alpha=3) 回归实际试模工时，本单总预测工时另加准备工时。训练/验证分割固定 42，仅在训练集拟合模型和标准化器；MAE 是留出样本 mean(abs(actual-predicted))。样本少于30失败，预测基础工时下限0.5h。钢材是演示工艺序列编码，扩展无序材料时应改one-hot并重训。
 
+漂移守门不改动上述回归：每台机独立维护序贯单边 CUSUM，第 i 单相对偏差 d_i=(观测工时−冻结预测工时)/冻结预测工时，增量 inc_i=max(0, d_i−k)，统计量 S_i=S_{i-1}+inc_i（轮内不归零），S_i≥h 即报警并暂停该机台新承诺。未完工单的观测工时取检测时刻已耗时（真实工时的下界），参与累加但不计入正常样本；「正常」必须同时满足完工样本数≥min_samples 且 S<h。k 默认 0.05、h 默认 0.30、min_samples 默认 5，均由主管在 `/drift/config` 调整，调整后按新参数对全部机台重放。
+
 Redis worker结果持久化 Estimate.model_result，同时写 backend/worker 共享命名卷 `/artifacts/estimate-<id>.json`。worker 在取走作业后故障中断的自动重投尚未实现；生产化需可靠队列和恢复机制。时段是人工预算，未实现跨日物理日历或设备停机联动。小型项目没有删除、承诺撤销或财务对接。实际工时按开工/完工时间差计算，未填时区按上海解释，保存UTC。单次最长168h，材料成本由领退料台账计算，单价在领料时冻结；没有停机扣时、工资分摊和多次试模合并。完工实绩没有自动写入训练参考表，基准160条不被暗改。
 
 V3范围：保养时间和客户签收可按演示日期录入，无设备时钟联锁；同模具仅允许一份running实绩。每次试模对同树脂批次只领一次，不提供追加领料或多次退料；批次隔离后的退回库存仍保持隔离。客户样件数按good_shots上界，不另展开一射多腔件数。没有仓库外接、实际物流发送、客户门户或电子签章。
+
+V4漂移守门范围：检测在 Redis 队列异步执行（队列名 `drift-runs`），开工/完工自动入队、主管改阈值或页面按钮手动重检；Redis 不可用时轮次保留为 queued，可手动重新发起。CUSUM 是相对偏差的单边累加器，不替换 Ridge 估价模型、不回写训练基准 160 条；机台分组依赖承诺时段 `MachineSlot.machine`，未承诺估单不进序列。未完工下界按检测时刻的已耗时计算，不接设备时钟；解除只认可最新一轮检测证据，不提供豁免开关。检测轮次与步骤长期保留用于审计，不做物理删除。
 
 ## 本地开发与结构
 
@@ -77,6 +83,8 @@ V3 `backend/src/workshop_models.py`定义MaintenanceWindow、ResinLot、TrialMat
 `backend/src/execution_models.py` 定义实绩/结算外键与唯一约束，`execution_schemas.py` 校验输入，`execution_service.py` 管理快照、工时与成本事务，`execution_routes.py` 暴露 `/executions`、`/cost-reviews` 及 finish/sign 操作。
 
 `frontend/src/pages/` 的 moulds/estimates/evidence/schedule/executions/reviews 及 maintenance/materials/deliveries 是九页；`api.js` HTTP；`store.js` 业务状态；`components/common.js` 状态标签/证据条/选择器跨页复用；`utils/format.js` 转义、金额/数字和表单工具。
+
+V4 `backend/src/drift_models.py` 定义 DriftConfig（单例阈值）、DriftRun/DriftStep（轮次与逐单 checkpoint）、DriftAlarm（active/released/superseded）、DriftMachineGate（机台承诺闸门）；`drift_service.py` 实现序贯 CUSUM、下界观测、原位替换重放、崩溃续跑与解除证据核对，`drift_routes.py` 暴露 `/drift/overview`、`/drift/pending`、`/drift/alarms`、`/drift/runs`、`/drift/config` 及 release 操作；`worker.py` 同时消费漂移与估价两个队列并在启动时恢复中断轮次。前端新增第 10 页 `pages/drift.js`，可查待观测下界、报警与解除原因、每轮每次检测依据。原表列无新增，create_all 非破坏性增加 5 张表。
 
 本地 `pip install -r backend/requirements.txt`，设置 DATABASE_URL/REDIS_URL，在backend目录 `uvicorn src.main:app --reload`，另一终端 `python -m src.worker`。前端建议使用Compose Nginx代理。
 
